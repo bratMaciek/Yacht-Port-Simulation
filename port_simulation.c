@@ -5,14 +5,11 @@
 #include <time.h>
 #include <stdatomic.h>
 
-#define NUM_YACHTS 20      // Total number of yachts
-#define PORT_ROWS 5        // Number of rows in the port
-#define PORT_COLS 8        // Number of columns in the port
-#define SLOT_LENGTH 50     // Length of each port slot in meters
-#define SLOT_WIDTH 10      // Width of each port slot in meters
+#define PORT_ROWS 20       // Number of rows in the port
+#define PORT_COLS 20       // Number of columns in the port
+#define SLOT_SIZE 5        // Each slot represents 5 meters
 #define MAX_QUEUE 10       // Max yachts in the waiting queue
 #define MAX_DOCKED 20      // Max yachts in the docked list
-#define MAX_WAIT_TIME 10   // Max wait time in seconds for fairness
 
 // Structure for a yacht
 typedef struct {
@@ -26,9 +23,7 @@ typedef struct {
 typedef struct {
     int row;              // Row index of the slot
     int col;              // Column index of the slot
-    int length;           // Length of the slot in meters
-    int width;            // Width of the slot in meters
-    atomic_int occupied;  // Occupied state: 0=free, 1=occupied
+    atomic_int occupied;  // ID of the occupying yacht, -1 if free
 } PortSlot;
 
 // Port and queue data
@@ -107,15 +102,34 @@ void add_to_queue(Yacht* yacht) {
 void assign_to_port(Yacht* yacht) {
     pthread_mutex_lock(&port_mutex);
 
-    // Check for available slots that can fit the yacht
-    for (int r = 0; r < PORT_ROWS; r++) {
-        for (int c = 0; c < PORT_COLS; c++) {
-            if (!atomic_load(&port[r][c].occupied) &&
-                port[r][c].length >= yacht->length &&
-                port[r][c].width >= yacht->width) {
-                // Dock the yacht in this slot
-                atomic_store(&port[r][c].occupied, 1);
-                atomic_store(&yacht->state, 2); // Docked
+    // Calculate the number of slots required by the yacht
+    int slots_length = yacht->length / SLOT_SIZE;
+    int slots_width = yacht->width / SLOT_SIZE;
+
+    // Look for available space in the port
+    for (int r = 0; r <= PORT_ROWS - slots_length; r++) {
+        for (int c = 0; c <= PORT_COLS - slots_width; c++) {
+            // Check if the required slots are free
+            int can_dock = 1;
+            for (int i = 0; i < slots_length; i++) {
+                for (int j = 0; j < slots_width; j++) {
+                    if (atomic_load(&port[r + i][c + j].occupied) != -1) {
+                        can_dock = 0;
+                        break;
+                    }
+                }
+                if (!can_dock) break;
+            }
+
+            // Dock the yacht if space is available
+            if (can_dock) {
+                for (int i = 0; i < slots_length; i++) {
+                    for (int j = 0; j < slots_width; j++) {
+                        atomic_store(&port[r + i][c + j].occupied, yacht->id);
+                    }
+                }
+
+                atomic_store(&yacht->state, 2); // Mark as docked
 
                 // Remove from queue and add to docked list
                 for (int i = 0; i < queue_size; i++) {
@@ -146,29 +160,33 @@ void assign_to_port(Yacht* yacht) {
 void release_slot(Yacht* yacht) {
     pthread_mutex_lock(&port_mutex);
 
-    // Find the slot occupied by this yacht and release it
+    // Calculate the number of slots occupied by the yacht
+    int slots_length = yacht->length / SLOT_SIZE;
+    int slots_width = yacht->width / SLOT_SIZE;
+
+    // Free the slots
     for (int r = 0; r < PORT_ROWS; r++) {
         for (int c = 0; c < PORT_COLS; c++) {
-            if (atomic_load(&port[r][c].occupied) &&
-                port[r][c].length >= yacht->length &&
-                port[r][c].width >= yacht->width) {
-                atomic_store(&port[r][c].occupied, 0); // Free the slot
-
-                // Remove from docked list
-                for (int i = 0; i < docked_size; i++) {
-                    if (docked[i].id == yacht->id) {
-                        // Shift docked list to remove yacht
-                        for (int j = i; j < docked_size - 1; j++) {
-                            docked[j] = docked[j + 1];
-                        }
-                        docked_size--;
-                        break;
+            if (atomic_load(&port[r][c].occupied) == yacht->id) {
+                for (int i = 0; i < slots_length; i++) {
+                    for (int j = 0; j < slots_width; j++) {
+                        atomic_store(&port[r + i][c + j].occupied, -1);
                     }
                 }
-
-                pthread_mutex_unlock(&port_mutex);
-                return;
+                break;
             }
+        }
+    }
+
+    // Remove from docked list
+    for (int i = 0; i < docked_size; i++) {
+        if (docked[i].id == yacht->id) {
+            // Shift docked list to remove yacht
+            for (int j = i; j < docked_size - 1; j++) {
+                docked[j] = docked[j + 1];
+            }
+            docked_size--;
+            break;
         }
     }
 
@@ -203,10 +221,10 @@ void display_port() {
     mvprintw(1, 10, "Port:");
     for (int r = 0; r < PORT_ROWS; r++) {
         for (int c = 0; c < PORT_COLS; c++) {
-            if (atomic_load(&port[r][c].occupied)) {
-                mvprintw(3 + r, 10 + c * 5, "[X]");
+            if (atomic_load(&port[r][c].occupied) != -1) {
+                mvprintw(3 + r, 10 + c * 6, " [%3d] ", atomic_load(&port[r][c].occupied));
             } else {
-                mvprintw(3 + r, 10 + c * 5, "[ ]");
+                mvprintw(3 + r, 10 + c * 6, " [   ] ");
             }
         }
     }
@@ -216,9 +234,9 @@ void display_port() {
 // Display the waiting queue
 void display_queue() {
     attron(COLOR_PAIR(2));
-    mvprintw(10, 10, "Waiting Queue:");
+    mvprintw(25, 10, "Waiting Queue:"); // Place queue at the bottom
     for (int i = 0; i < queue_size; i++) {
-        mvprintw(12 + i, 10, "Yacht ID:%d Size:%dm x %dm", queue[i].id, queue[i].length, queue[i].width);
+        mvprintw(27, 10 + i * 15, "ID:%d Size:%dmx%dm", queue[i].id, queue[i].length, queue[i].width);
     }
     attroff(COLOR_PAIR(2));
 }
@@ -226,9 +244,9 @@ void display_queue() {
 // Display the list of docked yachts
 void display_docked_list() {
     attron(COLOR_PAIR(3));
-    mvprintw(10, 40, "Docked Yachts:");
+    mvprintw(25, 80, "Docked Yachts:"); // Place docked list on the right
     for (int i = 0; i < docked_size; i++) {
-        mvprintw(12 + i, 40, "Yacht ID:%d Size:%dm x %dm", docked[i].id, docked[i].length, docked[i].width);
+        mvprintw(27 + i, 80, "ID:%d Size:%dmx%dm", docked[i].id, docked[i].length, docked[i].width);
     }
     attroff(COLOR_PAIR(3));
 }
@@ -242,9 +260,7 @@ int main() {
         for (int c = 0; c < PORT_COLS; c++) {
             port[r][c].row = r;
             port[r][c].col = c;
-            port[r][c].length = SLOT_LENGTH;
-            port[r][c].width = SLOT_WIDTH;
-            atomic_store(&port[r][c].occupied, 0);
+            atomic_store(&port[r][c].occupied, -1); // Mark as free
         }
     }
 
@@ -252,22 +268,18 @@ int main() {
     pthread_t display_tid;
     pthread_create(&display_tid, NULL, display_thread, NULL);
 
-    // Create yacht threads
-    pthread_t yacht_tids[NUM_YACHTS];
-    Yacht yachts[NUM_YACHTS];
+    // Dynamically create yacht threads
+    int yacht_id = 1;
+    while (1) {
+        Yacht* yacht = (Yacht*)malloc(sizeof(Yacht));
+        yacht->id = yacht_id++;
+        yacht->length = rand() % 50 + 10; // Random length between 10m and 40m
+        yacht->width = rand() % 45 + 5;    // Random width between 5m and 10m
+        atomic_store(&yacht->state, 1);   // Initial state: waiting
 
-    for (int i = 0; i < NUM_YACHTS; i++) {
-        yachts[i].id = i + 1;
-        yachts[i].length = rand() % 30 + 10; // Random length between 10m and 40m
-        yachts[i].width = rand() % 5 + 5;    // Random width between 5m and 10m
-        atomic_store(&yachts[i].state, 1);   // Initial state: waiting
-        pthread_create(&yacht_tids[i], NULL, yacht_thread, &yachts[i]);
-        usleep(500000); // Stagger yacht arrivals
-    }
-
-    // Wait for all yachts to finish
-    for (int i = 0; i < NUM_YACHTS; i++) {
-        pthread_join(yacht_tids[i], NULL);
+        pthread_t yacht_tid;
+        pthread_create(&yacht_tid, NULL, yacht_thread, yacht);
+        usleep(2000000); // Stagger yacht arrivals
     }
 
     // Wait for the display thread to finish
