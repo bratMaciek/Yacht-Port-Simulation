@@ -4,6 +4,7 @@
 #include <unistd.h>
 #include <time.h>
 #include <stdatomic.h>
+#include <math.h>
 
 #define PORT_ROWS 20       // Number of rows in the port
 #define PORT_COLS 20       // Number of columns in the port
@@ -103,9 +104,9 @@ void assign_to_port(Yacht* yacht) {
     pthread_mutex_lock(&port_mutex);
 
     // Calculate the number of slots required by the yacht
-    int slots_length = yacht->length / SLOT_SIZE;
-    int slots_width = yacht->width / SLOT_SIZE;
-
+    int slots_length = ceil((double)yacht->length / SLOT_SIZE);
+    int slots_width  = ceil((double)yacht->width / SLOT_SIZE);
+    
     // Look for available space in the port
     for (int r = 0; r <= PORT_ROWS - slots_length; r++) {
         for (int c = 0; c <= PORT_COLS - slots_width; c++) {
