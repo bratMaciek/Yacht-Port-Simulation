@@ -57,10 +57,20 @@ void init_ncurses() {
     noecho();
     curs_set(0);
     start_color();
-    init_pair(1, COLOR_WHITE, COLOR_BLUE);   // Port slots
-    init_pair(2, COLOR_WHITE, COLOR_RED);    // Waiting queue
-    init_pair(3, COLOR_GREEN, COLOR_BLACK);  // Docked yachts
+
+    // Default slot background
+    init_pair(1, COLOR_WHITE, COLOR_BLUE);
+
+    // Dynamic yacht colors (up to 6 unique colors for demonstration)
+    init_pair(2, COLOR_WHITE, COLOR_RED);
+    init_pair(3, COLOR_WHITE, COLOR_GREEN);
+    init_pair(4, COLOR_WHITE, COLOR_YELLOW);
+    init_pair(5, COLOR_WHITE, COLOR_MAGENTA);
+    init_pair(6, COLOR_WHITE, COLOR_CYAN);
+
+    // You can add more if supported by terminal
 }
+
 
 // Clean up ncurses
 void cleanup_ncurses() {
@@ -161,28 +171,39 @@ void assign_to_port(Yacht* yacht) {
 void release_slot(Yacht* yacht) {
     pthread_mutex_lock(&port_mutex);
 
-    // Calculate the number of slots occupied by the yacht
-    int slots_length = yacht->length / SLOT_SIZE;
-    int slots_width = yacht->width / SLOT_SIZE;
+    int slots_length = ceil((double)yacht->length / SLOT_SIZE);
+    int slots_width = ceil((double)yacht->width / SLOT_SIZE);
 
-    // Free the slots
-    for (int r = 0; r < PORT_ROWS; r++) {
-        for (int c = 0; c < PORT_COLS; c++) {
-            if (atomic_load(&port[r][c].occupied) == yacht->id) {
+    // Scan to find the top-left slot occupied by the yacht
+    for (int r = 0; r <= PORT_ROWS - slots_length; r++) {
+        for (int c = 0; c <= PORT_COLS - slots_width; c++) {
+            int found = 1;
+            for (int i = 0; i < slots_length; i++) {
+                for (int j = 0; j < slots_width; j++) {
+                    if (atomic_load(&port[r + i][c + j].occupied) != yacht->id) {
+                        found = 0;
+                        break;
+                    }
+                }
+                if (!found) break;
+            }
+
+            if (found) {
                 for (int i = 0; i < slots_length; i++) {
                     for (int j = 0; j < slots_width; j++) {
                         atomic_store(&port[r + i][c + j].occupied, -1);
                     }
                 }
-                break;
+                // Found and cleared
+                goto done;
             }
         }
     }
 
-    // Remove from docked list
+done:
+    // Remove from docked list safely
     for (int i = 0; i < docked_size; i++) {
         if (docked[i].id == yacht->id) {
-            // Shift docked list to remove yacht
             for (int j = i; j < docked_size - 1; j++) {
                 docked[j] = docked[j + 1];
             }
@@ -216,20 +237,25 @@ void* display_thread(void* arg) {
     pthread_exit(NULL);
 }
 
-// Display the port
+// Enhanced display of the port with color per yacht ID
 void display_port() {
-    attron(COLOR_PAIR(1));
     mvprintw(1, 10, "Port:");
     for (int r = 0; r < PORT_ROWS; r++) {
         for (int c = 0; c < PORT_COLS; c++) {
-            if (atomic_load(&port[r][c].occupied) != -1) {
-                mvprintw(3 + r, 10 + c * 6, " [%3d] ", atomic_load(&port[r][c].occupied));
+            int yacht_id = atomic_load(&port[r][c].occupied);
+            if (yacht_id != -1) {
+                // Generate a color pair based on yacht ID (limited to available pairs)
+                int color_pair = (yacht_id % 5) + 2; // Example: cycle between 6 color pairs 1-6
+                attron(COLOR_PAIR(color_pair));
+                mvprintw(3 + r, 10 + c * 6, " [%3d] ", yacht_id);
+                attroff(COLOR_PAIR(color_pair));
             } else {
+                attron(COLOR_PAIR(1)); // Default for empty slots
                 mvprintw(3 + r, 10 + c * 6, " [   ] ");
+                attroff(COLOR_PAIR(1));
             }
         }
     }
-    attroff(COLOR_PAIR(1));
 }
 
 // Display the waiting queue
@@ -237,7 +263,7 @@ void display_queue() {
     attron(COLOR_PAIR(2));
     mvprintw(25, 10, "Waiting Queue:"); // Place queue at the bottom
     for (int i = 0; i < queue_size; i++) {
-        mvprintw(27, 10 + i * 15, "ID:%d Size:%dmx%dm", queue[i].id, queue[i].length, queue[i].width);
+        mvprintw(27 + i, 10, "ID:%d Size:%dmx%dm", queue[i].id, queue[i].length, queue[i].width);
     }
     attroff(COLOR_PAIR(2));
 }
