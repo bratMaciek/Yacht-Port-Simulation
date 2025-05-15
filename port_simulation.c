@@ -11,6 +11,7 @@
 #define SLOT_SIZE 5        // Each slot represents 5 meters
 #define MAX_QUEUE 10       // Max yachts in the waiting queue
 #define MAX_DOCKED 20      // Max yachts in the docked list
+#define QUAY_LENGTH 5      // Amount of columns in quey
 
 // Structure for a yacht
 typedef struct {
@@ -67,6 +68,8 @@ void init_ncurses() {
     init_pair(4, COLOR_WHITE, COLOR_YELLOW);
     init_pair(5, COLOR_WHITE, COLOR_MAGENTA);
     init_pair(6, COLOR_WHITE, COLOR_CYAN);
+    init_pair(7, COLOR_BLACK, COLOR_WHITE);  // Pure white on black for quay
+
 
     // You can add more if supported by terminal
 }
@@ -243,20 +246,27 @@ void display_port() {
     for (int r = 0; r < PORT_ROWS; r++) {
         for (int c = 0; c < PORT_COLS; c++) {
             int yacht_id = atomic_load(&port[r][c].occupied);
-            if (yacht_id != -1) {
-                // Generate a color pair based on yacht ID (limited to available pairs)
-                int color_pair = (yacht_id % 5) + 2; // Example: cycle between 6 color pairs 1-6
+
+            if (yacht_id == -2) {
+                // Quay area displayed in strict white on black
+                attron(COLOR_PAIR(7)); // You need to define COLOR_PAIR(7) as white on black
+                mvprintw(3 + r, 10 + c * 6, "[||||]");
+                attroff(COLOR_PAIR(7));
+            }
+            else if (yacht_id != -1) {
+                int color_pair = (yacht_id % 5) + 2;
                 attron(COLOR_PAIR(color_pair));
-                mvprintw(3 + r, 10 + c * 6, " [%3d] ", yacht_id);
+                mvprintw(3 + r, 10 + c * 6, "[%4d]", yacht_id);
                 attroff(COLOR_PAIR(color_pair));
             } else {
-                attron(COLOR_PAIR(1)); // Default for empty slots
-                mvprintw(3 + r, 10 + c * 6, " [   ] ");
+                attron(COLOR_PAIR(1));
+                mvprintw(3 + r, 10 + c * 6, "[    ]");
                 attroff(COLOR_PAIR(1));
             }
         }
     }
 }
+
 
 // Display the waiting queue
 void display_queue() {
@@ -287,7 +297,13 @@ int main() {
         for (int c = 0; c < PORT_COLS; c++) {
             port[r][c].row = r;
             port[r][c].col = c;
-            atomic_store(&port[r][c].occupied, -1); // Mark as free
+            if((PORT_COLS / QUAY_LENGTH) == c % QUAY_LENGTH){
+                atomic_store(&port[r][c].occupied, -2); // Mark as occupied by quay
+            }
+            else{
+                atomic_store(&port[r][c].occupied, -1); // Mark as free   
+            }
+    
         }
     }
 
