@@ -24,3 +24,6 @@ Install `ncurses` on Ubuntu:
 
 ```bash
 sudo apt install libncurses5-dev libncursesw5-dev
+```
+###Compilation
+gcc -o port_simulation port_simulation.c -lm -lpthread -lncurses -g
