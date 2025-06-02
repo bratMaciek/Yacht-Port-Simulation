@@ -7,11 +7,18 @@
 #include <math.h>
 
 #define PORT_ROWS 20       // Number of rows in the port
-#define PORT_COLS 20       // Number of columns in the port
+#define PORT_COLS 25      // Number of columns in the port
 #define SLOT_SIZE 5        // Each slot represents 5 meters
 #define MAX_QUEUE 10       // Max yachts in the waiting queue
 #define MAX_DOCKED 20      // Max yachts in the docked list
-#define QUAY_LENGTH 5      // Amount of columns in quey
+#define QUAY_LENGTH 3      // Amount of columns in quey
+
+#define YACHT_MIN_LENGTH 10
+#define YACHT_MAX_LENGTH 50
+
+#define YACHT_MIN_WIDTH 5
+#define YACHT_MAX_WIDTH 30
+
 
 // Structure for a yacht
 typedef struct {
@@ -25,7 +32,7 @@ typedef struct {
 typedef struct {
     int row;              // Row index of the slot
     int col;              // Column index of the slot
-    atomic_int occupied;  // ID of the occupying yacht, -1 if free
+    atomic_int occupied;  // ID of the occupying yacht, -1 if free, -2 if quay, -3 if oil pump
 } PortSlot;
 
 // Port and queue data
@@ -69,7 +76,7 @@ void init_ncurses() {
     init_pair(5, COLOR_WHITE, COLOR_MAGENTA);
     init_pair(6, COLOR_WHITE, COLOR_CYAN);
     init_pair(7, COLOR_BLACK, COLOR_WHITE);  // Pure white on black for quay
-
+    init_pair(8, COLOR_BLACK, COLOR_YELLOW); // For oil pumps
 
     // You can add more if supported by terminal
 }
@@ -112,58 +119,101 @@ void add_to_queue(Yacht* yacht) {
     }
 }
 
-// Assign a yacht to the port
+
+void fuel_station(){
+    
+}
+
 void assign_to_port(Yacht* yacht) {
     pthread_mutex_lock(&port_mutex);
 
-    // Calculate the number of slots required by the yacht
     int slots_length = ceil((double)yacht->length / SLOT_SIZE);
     int slots_width  = ceil((double)yacht->width / SLOT_SIZE);
-    
-    // Look for available space in the port
+
+    int best_r = -1, best_c = -1;
+    int best_quay_distance = PORT_COLS * SLOT_SIZE;  // safe upper bound
+
     for (int r = 0; r <= PORT_ROWS - slots_length; r++) {
         for (int c = 0; c <= PORT_COLS - slots_width; c++) {
-            // Check if the required slots are free
             int can_dock = 1;
-            for (int i = 0; i < slots_length; i++) {
+
+            // Check if all required slots are free (-1)
+            for (int i = 0; i < slots_length && can_dock; i++) {
                 for (int j = 0; j < slots_width; j++) {
                     if (atomic_load(&port[r + i][c + j].occupied) != -1) {
                         can_dock = 0;
                         break;
                     }
                 }
-                if (!can_dock) break;
             }
 
-            // Dock the yacht if space is available
             if (can_dock) {
-                for (int i = 0; i < slots_length; i++) {
-                    for (int j = 0; j < slots_width; j++) {
-                        atomic_store(&port[r + i][c + j].occupied, yacht->id);
-                    }
-                }
+                // Find the smallest distance to the nearest quay in this row
+                int min_distance = PORT_COLS * SLOT_SIZE;
 
-                atomic_store(&yacht->state, 2); // Mark as docked
+                for (int j = c; j < c + slots_width; j++) {
+                    int left = j, right = j;
+                    int left_dist = PORT_COLS * SLOT_SIZE;
+                    int right_dist = PORT_COLS * SLOT_SIZE;
 
-                // Remove from queue and add to docked list
-                for (int i = 0; i < queue_size; i++) {
-                    if (queue[i].id == yacht->id) {
-                        // Shift queue to remove yacht
-                        for (int j = i; j < queue_size - 1; j++) {
-                            queue[j] = queue[j + 1];
+                    // Check left
+                    while (left >= 0) {
+                        if (atomic_load(&port[r][left].occupied) == -2) {
+                            left_dist = j - left;
+                            break;
                         }
-                        queue_size--;
-                        break;
+                        left--;
+                    }
+
+                    // Check right
+                    while (right < PORT_COLS) {
+                        if (atomic_load(&port[r][right].occupied) == -2) {
+                            right_dist = right - j;
+                            break;
+                        }
+                        right++;
+                    }
+
+                    int local_min = (left_dist < right_dist) ? left_dist : right_dist;
+                    if (local_min < min_distance) {
+                        min_distance = local_min;
                     }
                 }
 
-                if (docked_size < MAX_DOCKED) {
-                    docked[docked_size++] = *yacht;
+                // Update best spot if this one is closer to quay
+                if (min_distance < best_quay_distance) {
+                    best_quay_distance = min_distance;
+                    best_r = r;
+                    best_c = c;
                 }
-
-                pthread_mutex_unlock(&port_mutex);
-                return;
             }
+        }
+    }
+
+    // If we found a valid spot, dock the yacht
+    if (best_r != -1 && best_c != -1) {
+        for (int i = 0; i < slots_length; i++) {
+            for (int j = 0; j < slots_width; j++) {
+                atomic_store(&port[best_r + i][best_c + j].occupied, yacht->id);
+            }
+        }
+
+        atomic_store(&yacht->state, 2); // docked
+
+        // Remove yacht from the queue
+        for (int i = 0; i < queue_size; i++) {
+            if (queue[i].id == yacht->id) {
+                for (int j = i; j < queue_size - 1; j++) {
+                    queue[j] = queue[j + 1];
+                }
+                queue_size--;
+                break;
+            }
+        }
+
+        // Add to docked list
+        if (docked_size < MAX_DOCKED) {
+            docked[docked_size++] = *yacht;
         }
     }
 
@@ -253,6 +303,11 @@ void display_port() {
                 mvprintw(3 + r, 10 + c * 6, "[||||]");
                 attroff(COLOR_PAIR(7));
             }
+            else if (yacht_id == -3) {
+                attron(COLOR_PAIR(8));
+                mvprintw(3 + r, 10 + c * 6, "[ OIL]");
+                attroff(COLOR_PAIR(8));
+            } 
             else if (yacht_id != -1) {
                 int color_pair = (yacht_id % 5) + 2;
                 attron(COLOR_PAIR(color_pair));
@@ -266,7 +321,6 @@ void display_port() {
         }
     }
 }
-
 
 // Display the waiting queue
 void display_queue() {
@@ -291,19 +345,30 @@ void display_docked_list() {
 int main() {
     srand(time(NULL));
     init_ncurses();
+    int spacing = QUAY_LENGTH; // initial spacing between quays
 
-    // Initialize the port slots
     for (int r = 0; r < PORT_ROWS; r++) {
+        int next_quay = 0;           // column index of the next quay slot
+        int spacing = QUAY_LENGTH;   // spacing between quays
+        int last_quay_col = PORT_COLS;      // initialize as -1 (no quay placed yet)
+
         for (int c = 0; c < PORT_COLS; c++) {
             port[r][c].row = r;
             port[r][c].col = c;
-            if((PORT_COLS / QUAY_LENGTH) == c % QUAY_LENGTH){
-                atomic_store(&port[r][c].occupied, -2); // Mark as occupied by quay
+
+            if (c == next_quay) {
+                atomic_store(&port[r][c].occupied, -2); // quay
+                last_quay_col = c;                      // update last quay column position
+                next_quay += spacing;
+                spacing++;  // increase spacing for next quay (rarer)
+            } else {
+                if(last_quay_col > floor(PORT_COLS/2)){
+                    atomic_store(&port[r][c].occupied, -3); // oil pump
+                }
+                else{
+                    atomic_store(&port[r][c].occupied, -1); // free
+                }
             }
-            else{
-                atomic_store(&port[r][c].occupied, -1); // Mark as free   
-            }
-    
         }
     }
 
@@ -316,8 +381,9 @@ int main() {
     while (1) {
         Yacht* yacht = (Yacht*)malloc(sizeof(Yacht));
         yacht->id = yacht_id++;
-        yacht->length = rand() % 50 + 10; // Random length between 10m and 40m
-        yacht->width = rand() % 45 + 5;    // Random width between 5m and 10m
+        yacht->length = rand() % (YACHT_MAX_LENGTH - YACHT_MIN_LENGTH + 1) + YACHT_MIN_LENGTH;
+        yacht->width = rand() % (YACHT_MAX_WIDTH - YACHT_MIN_WIDTH + 1) + YACHT_MIN_WIDTH;
+        
         atomic_store(&yacht->state, 1);   // Initial state: waiting
 
         pthread_t yacht_tid;
